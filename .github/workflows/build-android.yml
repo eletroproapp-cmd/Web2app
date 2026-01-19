@@ -1,0 +1,190 @@
+name: Build Android App
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: 'URL of the web application'
+        required: true
+        type: string
+      app_name:
+        description: 'Name of the application'
+        required: true
+        type: string
+      package_id:
+        description: 'Android package ID (e.g., com.example.app)'
+        required: true
+        type: string
+      icon_url:
+        description: 'URL of the app icon (optional)'
+        required: false
+        type: string
+      build_id:
+        description: 'Build ID for tracking'
+        required: true
+        type: string
+      webhook_url:
+        description: 'Webhook URL for status updates'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Notify build started
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "validating", "progress": 10}'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Validate web URL
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.web_url }}")
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "301" ] && [ "$HTTP_STATUS" != "302" ]; then
+            curl -X POST "${{ inputs.webhook_url }}" \
+              -H "Content-Type: application/json" \
+              -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Web URL returned status $HTTP_STATUS"}'
+            exit 1
+          fi
+          echo "Web URL is accessible (HTTP $HTTP_STATUS)"
+
+      - name: Configure Capacitor
+        run: |
+          sed -i 's|{{PACKAGE_ID}}|${{ inputs.package_id }}|g' capacitor.config.template.json
+          sed -i 's|{{APP_NAME}}|${{ inputs.app_name }}|g' capacitor.config.template.json
+          sed -i 's|{{WEB_URL}}|${{ inputs.web_url }}|g' capacitor.config.template.json
+          mv capacitor.config.template.json capacitor.config.json
+          cat capacitor.config.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Create minimal web dist
+        run: |
+          mkdir -p dist
+          cat > dist/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${{ inputs.app_name }}</title>
+            <style>
+              body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #0f172a; }
+              .loader { width: 48px; height: 48px; border: 4px solid #fff; border-bottom-color: #6366f1; border-radius: 50%; animation: spin 1s linear infinite; }
+              @keyframes spin { to { transform: rotate(360deg); } }
+            </style>
+          </head>
+          <body>
+            <div class="loader"></div>
+            <script>window.location.href = "${{ inputs.web_url }}";</script>
+          </body>
+          </html>
+          EOF
+
+      - name: Notify building
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "building", "progress": 40}'
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Download and set app icon
+        if: ${{ inputs.icon_url != '' }}
+        run: |
+          curl -L "${{ inputs.icon_url }}" -o icon.png
+          for size in 48 72 96 144 192; do
+            folder=""
+            case $size in
+              48)  folder="mdpi" ;;
+              72)  folder="hdpi" ;;
+              96)  folder="xhdpi" ;;
+              144) folder="xxhdpi" ;;
+              192) folder="xxxhdpi" ;;
+            esac
+            mkdir -p android/app/src/main/res/mipmap-$folder
+            convert icon.png -resize ${size}x${size} android/app/src/main/res/mipmap-$folder/ic_launcher.png
+            convert icon.png -resize ${size}x${size} android/app/src/main/res/mipmap-$folder/ic_launcher_round.png
+          done || echo "Icon processing skipped (imagemagick not available)"
+
+      - name: Update Android package name
+        run: |
+          sed -i "s/applicationId \".*\"/applicationId \"${{ inputs.package_id }}\"/g" android/app/build.gradle
+          sed -i "s/namespace \".*\"/namespace \"${{ inputs.package_id }}\"/g" android/app/build.gradle
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Notify signing
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 70}'
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Build AAB (Release Bundle)
+        working-directory: android
+        run: ./gradlew bundleRelease --no-daemon || ./gradlew bundleDebug --no-daemon
+
+      - name: Find build outputs
+        id: find_outputs
+        run: |
+          APK_PATH=$(find android/app/build/outputs -name "*.apk" | head -1)
+          AAB_PATH=$(find android/app/build/outputs -name "*.aab" | head -1 || echo "")
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "aab_path=$AAB_PATH" >> $GITHUB_OUTPUT
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_id }}-apk
+          path: ${{ steps.find_outputs.outputs.apk_path }}
+          retention-days: 7
+
+      - name: Upload AAB artifact
+        if: ${{ steps.find_outputs.outputs.aab_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_id }}-aab
+          path: ${{ steps.find_outputs.outputs.aab_path }}
+          retention-days: 7
+
+      - name: Notify complete
+        run: |
+          ARTIFACT_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"build_id\": \"${{ inputs.build_id }}\", \"status\": \"complete\", \"progress\": 100, \"artifact_url\": \"$ARTIFACT_URL\"}"
+
+      - name: Notify failure on error
+        if: failure()
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Build failed. Check workflow logs for details."}'
