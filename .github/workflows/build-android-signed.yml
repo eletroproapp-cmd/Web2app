@@ -1,10 +1,5 @@
 name: Build Android (Signed for Play Store)
 
-# ============================================
-# Workflow para build assinado com Upload Key
-# Compatível com Play App Signing
-# ============================================
-
 on:
   workflow_dispatch:
     inputs:
@@ -16,10 +11,10 @@ on:
         description: 'ID do build para tracking'
         required: true
         type: string
-  
+
   repository_dispatch:
     types: [build-android-signed]
-
+    
 env:
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
 
