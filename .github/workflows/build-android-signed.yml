@@ -96,7 +96,7 @@ jobs:
       - name: Decode keystore
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
-          echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > upload-key.jks
+         echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | tr -d '\n ' | base64 -d > upload-key.jks
 
       - name: Create package.json
         run: |
