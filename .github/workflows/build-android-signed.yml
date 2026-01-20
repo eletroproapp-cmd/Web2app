@@ -158,6 +158,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -168,12 +169,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK Platform 35
+      - name: Install Android SDK 35
         run: |
           echo "📦 Installing Android SDK Platform 35..."
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
-          sdkmanager --list | grep -E "android-35|35.0.0"
-          echo "✅ Android SDK 35 installed"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          echo "✅ SDK 35 installed"
 
       - name: Decode keystore
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
@@ -183,4 +183,5 @@ jobs:
           
           if [ -f upload-key.jks ] && [ -s upload-key.jks ]; then
             FILE_SIZE=$(stat -c%s upload-key.jks 2>/dev/null || stat -f%z upload-key.jks 2>/dev/null)
-            echo "✅
+            echo "✅ Keystore decoded: $FILE_SIZE bytes"
+          else
