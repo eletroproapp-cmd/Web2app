@@ -4,6 +4,7 @@ name: Build Android (Signed for Play Store)
 # Workflow para build assinado com Upload Key
 # Compatível com Play App Signing
 # API Level 35 (Google Play 2025+)
+# Auto-increment de versionCode
 # ============================================
 
 on:
@@ -316,38 +317,52 @@ jobs:
 
       - name: Update Android configuration
         run: |
-          # === 1. UPDATE STRINGS.XML (Nome do App) ===
+          # === 1. AUTO-INCREMENT VERSION CODE ===
+          # Usamos o GITHUB_RUN_NUMBER para garantir que o código de versão sempre aumente
+          VERSION_CODE=${{ github.run_number }}
+          VERSION_NAME="1.0.${{ github.run_number }}"
+          
+          BUILD_GRADLE="android/app/build.gradle"
+          if [ -f "$BUILD_GRADLE" ]; then
+            sed -i "s/versionCode .*/versionCode $VERSION_CODE/" "$BUILD_GRADLE"
+            sed -i "s/versionName .*/versionName \"$VERSION_NAME\"/" "$BUILD_GRADLE"
+            echo "✅ Version Code atualizado para: $VERSION_CODE"
+            echo "✅ Version Name atualizado para: $VERSION_NAME"
+          fi
+
+          # === 2. UPDATE STRINGS.XML (Nome do App) ===
           STRINGS_FILE="android/app/src/main/res/values/strings.xml"
           if [ -f "$STRINGS_FILE" ]; then
             sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ needs.fetch-config.outputs.app_name }}</string>|g" "$STRINGS_FILE"
             echo "✅ Nome do app atualizado em strings.xml"
           fi
 
-          # === 2. UPDATE build.gradle (Package ID) ===
-          BUILD_GRADLE="android/app/build.gradle"
+          # === 3. UPDATE build.gradle (Package ID) ===
           CLEAN_PACKAGE_ID=$(echo "${{ needs.fetch-config.outputs.app_id }}" | sed 's/ (unregistered)//g')
-          sed -i "s/applicationId \".*\"/applicationId \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
-          sed -i "s/namespace \".*\"/namespace \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
-          echo "✅ Package ID limpo: $CLEAN_PACKAGE_ID"
+          if [ -f "$BUILD_GRADLE" ]; then
+            sed -i "s/applicationId \".*\"/applicationId \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
+            sed -i "s/namespace \".*\"/namespace \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
+            echo "✅ Package ID limpo: $CLEAN_PACKAGE_ID"
+          fi
 
-          # === 3. UPDATE AndroidManifest.xml ===
+          # === 4. UPDATE AndroidManifest.xml ===
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
             sed -i "s/package=\".*\"/package=\"$CLEAN_PACKAGE_ID\"/g" "$MANIFEST"
           fi
 
-          # === 4. UPDATE capacitor.config.json ===
+          # === 5. UPDATE capacitor.config.json ===
           if [ -f "capacitor.config.json" ]; then
             sed -i "s/\"appId\": \".*\"/\"appId\": \"$CLEAN_PACKAGE_ID\"/g" capacitor.config.json
             sed -i "s/\"appName\": \".*\"/\"appName\": \"${{ needs.fetch-config.outputs.app_name }}\"/g" capacitor.config.json
           fi
 
-          # === 5. UPDATE index.html (Web App) ===
+          # === 6. UPDATE index.html (Web App) ===
           if [ -f "index.html" ]; then
             sed -i "s|<title>.*</title>|<title>${{ needs.fetch-config.outputs.app_name }}</title>|g" index.html
           fi
           
-          echo "✅ Configuração do Android atualizada"
+          echo "✅ Configuração do Android e Versão atualizadas"
 
       - name: Configure signing in build.gradle
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
@@ -501,11 +516,13 @@ jobs:
           APK_URL="${{ steps.upload_apk.outputs.apk_url }}"
           AAB_URL="${{ steps.upload_aab.outputs.aab_url }}"
           SIGNED="${{ steps.outputs.outputs.signed }}"
+          VERSION_CODE="${{ github.run_number }}"
+          VERSION_NAME="1.0.${{ github.run_number }}"
           
           if [ "$SIGNED" == "true" ]; then
-            MESSAGE="✅ Build assinado completo! Pronto para Play Store."
+            MESSAGE="✅ Build assinado completo! Versão $VERSION_NAME (código $VERSION_CODE). Pronto para Play Store."
           else
-            MESSAGE="⚠️ Build completo (unsigned). Configure signing secrets para produção."
+            MESSAGE="⚠️ Build completo (unsigned). Versão $VERSION_NAME. Configure signing secrets para produção."
           fi
           
           curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
@@ -518,6 +535,8 @@ jobs:
               \"apk_url\": \"$APK_URL\",
               \"aab_url\": \"$AAB_URL\",
               \"signed\": $SIGNED,
+              \"version_code\": $VERSION_CODE,
+              \"version_name\": \"$VERSION_NAME\",
               \"workflow_run_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
             }" || true
 
