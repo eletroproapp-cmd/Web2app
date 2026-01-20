@@ -290,10 +290,32 @@ jobs:
 
       - name: Update Android configuration
         run: |
-          echo "📝 Updating Android configuration..."
-          sed -i "s/applicationId \".*\"/applicationId \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
-          sed -i "s/namespace \".*\"/namespace \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
-          echo "✅ Configuration updated"
+          # === 1. UPDATE STRINGS.XML (Nome do App) ===
+          STRINGS_FILE="android/app/src/main/res/values/strings.xml"
+          if [ -f "$STRINGS_FILE" ]; then
+            sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ needs.fetch-config.outputs.app_name }}</string>|g" "$STRINGS_FILE"
+            echo "✅ Nome do app atualizado em strings.xml"
+          fi
+
+          # === 2. UPDATE build.gradle (Package ID) ===
+          BUILD_GRADLE="android/app/build.gradle"
+          CLEAN_PACKAGE_ID=$(echo "${{ needs.fetch-config.outputs.app_id }}" | sed 's/ (unregistered)//g')
+          sed -i "s/applicationId \".*\"/applicationId \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
+          sed -i "s/namespace \".*\"/namespace \"$CLEAN_PACKAGE_ID\"/g" "$BUILD_GRADLE"
+          echo "✅ Package ID limpo: $CLEAN_PACKAGE_ID"
+
+          # === 3. UPDATE AndroidManifest.xml ===
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i "s/package=\".*\"/package=\"$CLEAN_PACKAGE_ID\"/g" "$MANIFEST"
+
+          # === 4. UPDATE capacitor.config.json ===
+          sed -i "s/\"appId\": \".*\"/\"appId\": \"$CLEAN_PACKAGE_ID\"/g" capacitor.config.json
+          sed -i "s/\"appName\": \".*\"/\"appName\": \"${{ needs.fetch-config.outputs.app_name }}\"/g" capacitor.config.json
+
+          # === 5. UPDATE index.html (Web App) ===
+          sed -i "s|<title>.*</title>|<title>${{ needs.fetch-config.outputs.app_name }}</title>|g" index.html
+          
+          echo "✅ Configuração do Android atualizada"
 
       - name: Configure signing in build.gradle
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
