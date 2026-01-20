@@ -15,12 +15,9 @@ on:
         description: 'URL do webhook para notificar progresso'
         required: true
         type: string
-  
-  repository_dispatch:
-    types: [build-android-signed]
 
 env:
-  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
 jobs:
   validate-secrets:
@@ -74,7 +71,7 @@ jobs:
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id }}", "status": "validating", "progress": 10}'
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "validating", "progress": 10}' || true
 
       - uses: actions/setup-node@v4
         with:
@@ -94,25 +91,35 @@ jobs:
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
           echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | tr -d '[:space:]' | base64 -d > upload-key.jks
+          echo "✅ Keystore decoded: $(stat -c%s upload-key.jks) bytes"
 
       - name: Create web build
         run: |
           mkdir -p www
-          echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><script>location.href="${{ needs.fetch-config.outputs.web_url }}"</script></head><body></body></html>' > www/index.html
+          cat > www/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <script>window.location.href = "${{ needs.fetch-config.outputs.web_url }}";</script>
+          </head>
+          <body></body>
+          </html>
+          EOF
 
       - name: Notify building (30%)
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id }}", "status": "building", "progress": 30}'
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "building", "progress": 30}' || true
 
       - run: npm install --legacy-peer-deps
       - run: npx cap add android
 
       - name: Configure SDK versions
         run: |
-          cd android
-          cat > variables.gradle << 'EOF'
+          cat > android/variables.gradle << 'EOF'
           ext {
               minSdkVersion = 24
               compileSdkVersion = 35
@@ -147,50 +154,68 @@ jobs:
 
       - name: Update app config
         run: |
-          sed -i 's/applicationId "[^"]*"/applicationId "${{ needs.fetch-config.outputs.app_id }}"/' android/app/build.gradle
-          sed -i 's/namespace "[^"]*"/namespace "${{ needs.fetch-config.outputs.app_id }}"/' android/app/build.gradle
-          sed -i 's/<string name="app_name">[^<]*</<string name="app_name">${{ needs.fetch-config.outputs.app_name }}</' android/app/src/main/res/values/strings.xml
+          APP_ID="${{ needs.fetch-config.outputs.app_id }}"
+          APP_NAME="${{ needs.fetch-config.outputs.app_name }}"
+          
+          sed -i "s/applicationId \"[^\"]*\"/applicationId \"$APP_ID\"/" android/app/build.gradle
+          sed -i "s/namespace \"[^\"]*\"/namespace \"$APP_ID\"/" android/app/build.gradle
+          sed -i "s/<string name=\"app_name\">[^<]*</<string name=\"app_name\">$APP_NAME</" android/app/src/main/res/values/strings.xml
 
       - name: Notify signing (50%)
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 50}'
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 50}' || true
 
-      - name: Configure signing
+      - name: Configure signing (inject into existing android block)
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
-          cp upload-key.jks android/app/
-          cat >> android/app/build.gradle << EOF
-          android {
-              signingConfigs {
-                  release {
-                      storeFile file("upload-key.jks")
-                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"
-                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"
-                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"
-                  }
-              }
-              buildTypes { release { signingConfig signingConfigs.release } }
-          }
-          EOF
+          cp upload-key.jks android/app/upload-key.jks
+          
+          # Inject signingConfigs INSIDE the existing android { } block
+          # Find the line with "android {" and inject after it
+          sed -i '/^android {/a\
+              signingConfigs {\
+                  release {\
+                      storeFile file("upload-key.jks")\
+                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"\
+                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"\
+                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"\
+                  }\
+              }' android/app/build.gradle
+          
+          # Update buildTypes release to use the signing config
+          sed -i 's/buildTypes {/buildTypes {\n        release {\n            signingConfig signingConfigs.release\n        }/' android/app/build.gradle
+          
+          echo "✅ Signing config injected"
 
       - run: npx cap sync android
+
+      - name: Debug Gradle - Show build.gradle content
+        run: |
+          echo "========== android/app/build.gradle =========="
+          cat android/app/build.gradle
+          echo ""
+          echo "========== android/variables.gradle =========="
+          cat android/variables.gradle
+          echo ""
+          echo "========== Checking for duplicate android blocks =========="
+          grep -n "^android {" android/app/build.gradle || echo "No duplicate android blocks found"
 
       - name: Build AAB
         run: |
           cd android && chmod +x gradlew
           if [ "${{ needs.validate-secrets.outputs.has_signing_config }}" == "true" ]; then
-            ./gradlew bundleRelease assembleRelease --stacktrace
+            ./gradlew bundleRelease assembleRelease --no-daemon --stacktrace
           else
-            ./gradlew bundleDebug assembleDebug --stacktrace
+            ./gradlew bundleDebug assembleDebug --no-daemon --stacktrace
           fi
 
       - name: Notify finalizing (80%)
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 80}'
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 80}' || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -205,11 +230,11 @@ jobs:
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d "{\"build_id\": \"${{ inputs.build_id }}\", \"status\": \"complete\", \"progress\": 100, \"artifact_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+            -d "{\"build_id\": \"${{ inputs.build_id }}\", \"status\": \"complete\", \"progress\": 100, \"artifact_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
 
       - name: Notify failed
         if: failure()
         run: |
           curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Build failed - check logs"}'
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Build failed - check logs"}' || true
