@@ -145,6 +145,8 @@ jobs:
         run: |
           sed -i "s/applicationId \".*\"/applicationId \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
           sed -i "s/namespace \".*\"/namespace \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
+          sed -i "s/compileSdk .*/compileSdk 35/g" android/app/build.gradle
+          sed -i "s/targetSdk .*/targetSdk 35/g" android/app/build.gradle
 
       - name: Configure signing
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
