@@ -96,17 +96,18 @@ jobs:
       - name: Create web build
         run: |
           mkdir -p www
-          cat > www/index.html << 'EOF'
+          cat > www/index.html << 'EOFHTML'
           <!DOCTYPE html>
           <html>
           <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <script>window.location.href = "${{ needs.fetch-config.outputs.web_url }}";</script>
           </head>
-          <body></body>
+          <body>
+            <script>window.location.href = "${{ needs.fetch-config.outputs.web_url }}";</script>
+          </body>
           </html>
-          EOF
+          EOFHTML
 
       - name: Notify building (30%)
         run: |
@@ -119,7 +120,7 @@ jobs:
 
       - name: Configure SDK versions
         run: |
-          cat > android/variables.gradle << 'EOF'
+          cat > android/variables.gradle << 'EOFGRADLE'
           ext {
               minSdkVersion = 24
               compileSdkVersion = 35
@@ -137,7 +138,7 @@ jobs:
               androidxEspressoCoreVersion = '3.5.1'
               cordovaAndroidVersion = '10.1.1'
           }
-          EOF
+          EOFGRADLE
 
       - name: Process app icon
         if: ${{ needs.fetch-config.outputs.icon_url != '' }}
@@ -167,42 +168,64 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 50}' || true
 
-      - name: Configure signing (inject into existing android block)
+      - name: Configure signing using Python
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
           cp upload-key.jks android/app/upload-key.jks
           
-          # Inject signingConfigs INSIDE the existing android { } block
-          # Find the line with "android {" and inject after it
-          sed -i '/^android {/a\
-              signingConfigs {\
-                  release {\
-                      storeFile file("upload-key.jks")\
-                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"\
-                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"\
-                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"\
-                  }\
-              }' android/app/build.gradle
+          python3 << 'EOFPYTHON'
+          import re
           
-          # Update buildTypes release to use the signing config
-          sed -i 's/buildTypes {/buildTypes {\n        release {\n            signingConfig signingConfigs.release\n        }/' android/app/build.gradle
+          with open('android/app/build.gradle', 'r') as f:
+              content = f.read()
           
-          echo "✅ Signing config injected"
+          # Add signingConfigs block before buildTypes
+          signing_config = '''
+              signingConfigs {
+                  release {
+                      storeFile file("upload-key.jks")
+                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"
+                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"
+                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"
+                  }
+              }
+          '''
+          
+          # Find buildTypes and insert signingConfigs before it
+          if 'signingConfigs' not in content:
+              content = re.sub(
+                  r'(    buildTypes\s*\{)',
+                  signing_config + r'\n\1',
+                  content
+              )
+          
+          # Add signingConfig to release buildType
+          if 'signingConfig signingConfigs.release' not in content:
+              content = re.sub(
+                  r'(buildTypes\s*\{\s*\n\s*release\s*\{)',
+                  r'\1\n            signingConfig signingConfigs.release',
+                  content
+              )
+          
+          with open('android/app/build.gradle', 'w') as f:
+              f.write(content)
+          
+          print("✅ Signing config injected successfully")
+          EOFPYTHON
 
       - run: npx cap sync android
 
-      - name: Debug Gradle - Show build.gradle content
+      - name: Debug Gradle - Show build.gradle
         run: |
           echo "========== android/app/build.gradle =========="
           cat android/app/build.gradle
           echo ""
-          echo "========== android/variables.gradle =========="
-          cat android/variables.gradle
-          echo ""
-          echo "========== Checking for duplicate android blocks =========="
-          grep -n "^android {" android/app/build.gradle || echo "No duplicate android blocks found"
+          echo "========== Checking structure =========="
+          grep -n "android {" android/app/build.gradle || echo "No android block found"
+          grep -n "signingConfigs" android/app/build.gradle || echo "No signingConfigs found"
+          grep -n "buildTypes" android/app/build.gradle || echo "No buildTypes found"
 
-      - name: Build AAB
+      - name: Build AAB and APK
         run: |
           cd android && chmod +x gradlew
           if [ "${{ needs.validate-secrets.outputs.has_signing_config }}" == "true" ]; then
