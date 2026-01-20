@@ -1,11 +1,5 @@
 name: Build Android (Signed for Play Store)
 
-## ============================================
-## Workflow para build assinado com Upload Key
-## Compatível com Play App Signing
-## API Level 35 (Google Play 2025+)
-## ============================================
-
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +9,10 @@ on:
         type: string
       build_id:
         description: 'ID do build para tracking'
+        required: true
+        type: string
+      webhook_url:
+        description: 'URL do webhook para notificar progresso'
         required: true
         type: string
   
@@ -34,44 +32,17 @@ jobs:
         id: check
         run: |
           MISSING=""
-          
-          if [ -z "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" ]; then
-            MISSING="$MISSING UPLOAD_KEYSTORE_BASE64"
-            echo "❌ Missing: UPLOAD_KEYSTORE_BASE64"
-          else
-            echo "✅ Found: UPLOAD_KEYSTORE_BASE64"
-          fi
-          
-          if [ -z "${{ secrets.UPLOAD_KEY_ALIAS }}" ]; then
-            MISSING="$MISSING UPLOAD_KEY_ALIAS"
-            echo "❌ Missing: UPLOAD_KEY_ALIAS"
-          else
-            echo "✅ Found: UPLOAD_KEY_ALIAS"
-          fi
-          
-          if [ -z "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}" ]; then
-            MISSING="$MISSING UPLOAD_KEYSTORE_PASSWORD"
-            echo "❌ Missing: UPLOAD_KEYSTORE_PASSWORD"
-          else
-            echo "✅ Found: UPLOAD_KEYSTORE_PASSWORD"
-          fi
-          
-          if [ -z "${{ secrets.UPLOAD_KEY_PASSWORD }}" ]; then
-            MISSING="$MISSING UPLOAD_KEY_PASSWORD"
-            echo "❌ Missing: UPLOAD_KEY_PASSWORD"
-          else
-            echo "✅ Found: UPLOAD_KEY_PASSWORD"
-          fi
+          if [ -z "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" ]; then MISSING="$MISSING UPLOAD_KEYSTORE_BASE64"; fi
+          if [ -z "${{ secrets.UPLOAD_KEY_ALIAS }}" ]; then MISSING="$MISSING UPLOAD_KEY_ALIAS"; fi
+          if [ -z "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}" ]; then MISSING="$MISSING UPLOAD_KEYSTORE_PASSWORD"; fi
+          if [ -z "${{ secrets.UPLOAD_KEY_PASSWORD }}" ]; then MISSING="$MISSING UPLOAD_KEY_PASSWORD"; fi
           
           if [ -z "$MISSING" ]; then
             echo "has_config=true" >> $GITHUB_OUTPUT
-            echo ""
             echo "🔐 All signing secrets configured!"
           else
             echo "has_config=false" >> $GITHUB_OUTPUT
-            echo ""
             echo "⚠️ Missing secrets:$MISSING"
-            echo "⚠️ Build will be UNSIGNED (debug mode)"
           fi
 
   fetch-config:
@@ -81,107 +52,164 @@ jobs:
       app_name: ${{ steps.config.outputs.app_name }}
       web_url: ${{ steps.config.outputs.web_url }}
       icon_url: ${{ steps.config.outputs.icon_url }}
-      webhook_url: ${{ steps.config.outputs.webhook_url }}
-      capacitor_config: ${{ steps.config.outputs.capacitor_config }}
-    
     steps:
       - name: Fetch build configuration
         id: config
         run: |
-          if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            CONFIG_URL="${{ github.event.client_payload.config_url }}"
-            BUILD_ID="${{ github.event.client_payload.build_id }}"
-          else
-            CONFIG_URL="${{ inputs.config_url }}"
-            BUILD_ID="${{ inputs.build_id }}"
-          fi
+          CONFIG_URL="${{ inputs.config_url }}"
+          RESPONSE=$(curl -s "$CONFIG_URL")
           
-          echo "📥 Fetching config from: $CONFIG_URL?buildId=$BUILD_ID"
-          RESPONSE=$(curl -s "$CONFIG_URL?buildId=$BUILD_ID")
-          
-          echo "📄 Response preview:"
-          echo "$RESPONSE" | head -c 500
-          echo ""
-          
-          APP_ID=$(echo "$RESPONSE" | jq -r '.config.appId')
-          APP_NAME=$(echo "$RESPONSE" | jq -r '.config.appName')
-          WEB_URL=$(echo "$RESPONSE" | jq -r '.config.webUrl')
-          ICON_URL=$(echo "$RESPONSE" | jq -r '.config.iconUrl // empty')
-          WEBHOOK_URL=$(echo "$RESPONSE" | jq -r '.config.buildMeta.webhookUrl')
-          CAPACITOR_CONFIG=$(echo "$RESPONSE" | jq -c '.files["capacitor.config.json"]')
-          
-          echo ""
-          echo "📱 App ID: $APP_ID"
-          echo "📱 App Name: $APP_NAME"
-          echo "🌐 Web URL: $WEB_URL"
-          echo "🖼️ Icon URL: $ICON_URL"
-          echo "🔗 Webhook URL: $WEBHOOK_URL"
-          
-          echo "app_id=$APP_ID" >> $GITHUB_OUTPUT
-          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
-          echo "web_url=$WEB_URL" >> $GITHUB_OUTPUT
-          echo "icon_url=$ICON_URL" >> $GITHUB_OUTPUT
-          echo "webhook_url=$WEBHOOK_URL" >> $GITHUB_OUTPUT
-          echo "capacitor_config=$CAPACITOR_CONFIG" >> $GITHUB_OUTPUT
-          
-          if [ "$APP_ID" == "null" ] || [ -z "$APP_ID" ]; then
-            echo ""
-            echo "❌ Invalid configuration - APP_ID is null or empty"
-            echo "❌ Full response:"
-            echo "$RESPONSE"
-            exit 1
-          fi
-          
-          echo ""
-          echo "✅ Configuration loaded successfully"
+          echo "app_id=$(echo "$RESPONSE" | jq -r '.config.appId')" >> $GITHUB_OUTPUT
+          echo "app_name=$(echo "$RESPONSE" | jq -r '.config.appName')" >> $GITHUB_OUTPUT
+          echo "web_url=$(echo "$RESPONSE" | jq -r '.config.webUrl')" >> $GITHUB_OUTPUT
+          echo "icon_url=$(echo "$RESPONSE" | jq -r '.config.iconUrl // empty')" >> $GITHUB_OUTPUT
 
   build:
     needs: [validate-secrets, fetch-config]
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Notify build started
+      - name: Notify build started (10%)
         run: |
-          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+          curl -X POST "${{ inputs.webhook_url }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "build_id": "${{ inputs.build_id || github.event.client_payload.build_id }}",
-              "status": "validating",
-              "progress": 10,
-              "message": "Validando configuração de assinatura"
-            }' || true
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "validating", "progress": 10}'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 35
-        run: |
-          echo "📦 Installing Android SDK Platform 35..."
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
-          echo "✅ SDK 35 installed"
+      - name: Install SDK 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Decode keystore
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
-          echo "🔐 Decoding keystore..."
           echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | tr -d '[:space:]' | base64 -d > upload-key.jks
-          
-          if [ -f upload-key.jks ] && [ -s upload-key.jks ]; then
-            FILE_SIZE=$(stat -c%s upload-key.jks 2>/dev/null || stat -f%z upload-key.jks 2>/dev/null)
-            echo "✅ Keystore decoded: $FILE_SIZE bytes"
+
+      - name: Create web build
+        run: |
+          mkdir -p www
+          echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><script>location.href="${{ needs.fetch-config.outputs.web_url }}"</script></head><body></body></html>' > www/index.html
+
+      - name: Notify building (30%)
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "building", "progress": 30}'
+
+      - run: npm install --legacy-peer-deps
+      - run: npx cap add android
+
+      - name: Configure SDK versions
+        run: |
+          cd android
+          cat > variables.gradle << 'EOF'
+          ext {
+              minSdkVersion = 24
+              compileSdkVersion = 35
+              targetSdkVersion = 35
+              buildToolsVersion = "35.0.0"
+              androidxActivityVersion = '1.8.0'
+              androidxAppCompatVersion = '1.6.1'
+              androidxCoordinatorLayoutVersion = '1.2.0'
+              androidxCoreVersion = '1.12.0'
+              androidxFragmentVersion = '1.6.2'
+              coreSplashScreenVersion = '1.0.1'
+              androidxWebkitVersion = '1.9.0'
+              junitVersion = '4.13.2'
+              androidxJunitVersion = '1.1.5'
+              androidxEspressoCoreVersion = '3.5.1'
+              cordovaAndroidVersion = '10.1.1'
+          }
+          EOF
+
+      - name: Process app icon
+        if: ${{ needs.fetch-config.outputs.icon_url != '' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          curl -L -o icon.png "${{ needs.fetch-config.outputs.icon_url }}"
+          for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            DENSITY=${d%:*}; SIZE=${d#*:}
+            mkdir -p android/app/src/main/res/mipmap-$DENSITY
+            convert icon.png -resize ${SIZE}x${SIZE} android/app/src/main/res/mipmap-$DENSITY/ic_launcher.png
+            cp android/app/src/main/res/mipmap-$DENSITY/ic_launcher.png android/app/src/main/res/mipmap-$DENSITY/ic_launcher_round.png
+            cp android/app/src/main/res/mipmap-$DENSITY/ic_launcher.png android/app/src/main/res/mipmap-$DENSITY/ic_launcher_foreground.png
+          done
+
+      - name: Update app config
+        run: |
+          sed -i 's/applicationId "[^"]*"/applicationId "${{ needs.fetch-config.outputs.app_id }}"/' android/app/build.gradle
+          sed -i 's/namespace "[^"]*"/namespace "${{ needs.fetch-config.outputs.app_id }}"/' android/app/build.gradle
+          sed -i 's/<string name="app_name">[^<]*</<string name="app_name">${{ needs.fetch-config.outputs.app_name }}</' android/app/src/main/res/values/strings.xml
+
+      - name: Notify signing (50%)
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 50}'
+
+      - name: Configure signing
+        if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
+        run: |
+          cp upload-key.jks android/app/
+          cat >> android/app/build.gradle << EOF
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("upload-key.jks")
+                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"
+                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"
+                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"
+                  }
+              }
+              buildTypes { release { signingConfig signingConfigs.release } }
+          }
+          EOF
+
+      - run: npx cap sync android
+
+      - name: Build AAB
+        run: |
+          cd android && chmod +x gradlew
+          if [ "${{ needs.validate-secrets.outputs.has_signing_config }}" == "true" ]; then
+            ./gradlew bundleRelease assembleRelease --stacktrace
           else
+            ./gradlew bundleDebug assembleDebug --stacktrace
+          fi
+
+      - name: Notify finalizing (80%)
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 80}'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: |
+            android/app/build/outputs/apk/**/app-*.apk
+            android/app/build/outputs/bundle/**/app-*.aab
+
+      - name: Notify complete (100%)
+        if: success()
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"build_id\": \"${{ inputs.build_id }}\", \"status\": \"complete\", \"progress\": 100, \"artifact_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+
+      - name: Notify failed
+        if: failure()
+        run: |
+          curl -X POST "${{ inputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Build failed - check logs"}'
