@@ -117,7 +117,7 @@ jobs:
           echo '${{ needs.fetch-config.outputs.capacitor_config }}' | jq -r '.' > capacitor.config.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Create minimal web build
         run: |
