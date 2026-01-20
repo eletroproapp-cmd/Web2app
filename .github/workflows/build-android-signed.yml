@@ -120,6 +120,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android SDK 35
+        run: |
+          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - name: Decode keystore
         if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
         run: |
@@ -168,6 +172,27 @@ jobs:
 
       - name: Add Android platform
         run: npx cap add android
+        - name: Force API 35 (compileSdk/targetSdk)
+        run: |
+          echo "🔧 Forcing API 35..."
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/compileSdkVersion[[:space:]]*[0-9]\+/compileSdkVersion 35/g' android/app/build.gradle || true
+            sed -i 's/targetSdkVersion[[:space:]]*[0-9]\+/targetSdkVersion 35/g' android/app/build.gradle || true
+            sed -i 's/compileSdk[[:space:]]*[0-9]\+/compileSdk 35/g' android/app/build.gradle || true
+            sed -i 's/targetSdk[[:space:]]*[0-9]\+/targetSdk 35/g' android/app/build.gradle || true
+          fi
+          if [ -f android/variables.gradle ]; then
+            sed -i 's/compileSdkVersion[[:space:]]*=[[:space:]]*[0-9]\+/compileSdkVersion = 35/g' android/variables.gradle || true
+            sed -i 's/targetSdkVersion[[:space:]]*=[[:space:]]*[0-9]\+/targetSdkVersion = 35/g' android/variables.gradle || true
+          fi
+          if [ -f android/variables.gradle ]; then
+            echo "Found android/variables.gradle"
+            sed -i 's/compileSdkVersion[[:space:]]*=[[:space:]]*[0-9]\+/compileSdkVersion = 35/g' android/variables.gradle || true
+            sed -i 's/targetSdkVersion[[:space:]]*=[[:space:]]*[0-9]\+/targetSdkVersion = 35/g' android/variables.gradle || true
+          fi
+
+          echo "✅ Result (search compileSdk/targetSdk):"
+          grep -RIn --line-number "compileSdk|compileSdkVersion|targetSdk|targetSdkVersion" android | head -n 200 || true
 
       - name: Download and process app icon
         if: ${{ needs.fetch-config.outputs.icon_url != '' }}
