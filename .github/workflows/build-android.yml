@@ -272,21 +272,47 @@ jobs:
         if: ${{ needs.fetch-config.outputs.icon_url != '' }}
         run: |
           echo "🖼️ Downloading icon from: ${{ needs.fetch-config.outputs.icon_url }}"
+          
+          # Instalar ImageMagick
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          
+          # Baixar ícone
           curl -L "${{ needs.fetch-config.outputs.icon_url }}" -o icon.png
           
           if [ -f icon.png ] && [ -s icon.png ]; then
             echo "✅ Icon downloaded"
+            
+            # Gerar todos os tamanhos necessários
             for size in 48 72 96 144 192; do
               folder=""
-              case $size in 48) folder="mdpi";; 72) folder="hdpi";; 96) folder="xhdpi";; 144) folder="xxhdpi";; 192) folder="xxxhdpi";; esac
+              case $size in 
+                48) folder="mdpi";; 
+                72) folder="hdpi";; 
+                96) folder="xhdpi";; 
+                144) folder="xxhdpi";; 
+                192) folder="xxxhdpi";; 
+              esac
+              
               mkdir -p android/app/src/main/res/mipmap-$folder
               convert icon.png -resize ${size}x${size} android/app/src/main/res/mipmap-$folder/ic_launcher.png 2>/dev/null || true
               convert icon.png -resize ${size}x${size} android/app/src/main/res/mipmap-$folder/ic_launcher_round.png 2>/dev/null || true
             done
-            echo "✅ Icons processed"
+            
+            echo "✅ Icons processed in 5 densities"
           else
             echo "⚠️ Icon download failed, using default"
           fi
+
+      - name: Sync Capacitor
+        run: |
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id || github.event.client_payload.build_id }}", "status": "building", "progress": 60, "message": "Sincronizando Capacitor"}' || true
+          
+          echo "🔄 Syncing Capacitor..."
+          npx cap sync android
+          echo "✅ Capacitor synced"
 
       - name: Update Android configuration
         run: |
@@ -306,14 +332,20 @@ jobs:
 
           # === 3. UPDATE AndroidManifest.xml ===
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i "s/package=\".*\"/package=\"$CLEAN_PACKAGE_ID\"/g" "$MANIFEST"
+          if [ -f "$MANIFEST" ]; then
+            sed -i "s/package=\".*\"/package=\"$CLEAN_PACKAGE_ID\"/g" "$MANIFEST"
+          fi
 
           # === 4. UPDATE capacitor.config.json ===
-          sed -i "s/\"appId\": \".*\"/\"appId\": \"$CLEAN_PACKAGE_ID\"/g" capacitor.config.json
-          sed -i "s/\"appName\": \".*\"/\"appName\": \"${{ needs.fetch-config.outputs.app_name }}\"/g" capacitor.config.json
+          if [ -f "capacitor.config.json" ]; then
+            sed -i "s/\"appId\": \".*\"/\"appId\": \"$CLEAN_PACKAGE_ID\"/g" capacitor.config.json
+            sed -i "s/\"appName\": \".*\"/\"appName\": \"${{ needs.fetch-config.outputs.app_name }}\"/g" capacitor.config.json
+          fi
 
           # === 5. UPDATE index.html (Web App) ===
-          sed -i "s|<title>.*</title>|<title>${{ needs.fetch-config.outputs.app_name }}</title>|g" index.html
+          if [ -f "index.html" ]; then
+            sed -i "s|<title>.*</title>|<title>${{ needs.fetch-config.outputs.app_name }}</title>|g" index.html
+          fi
           
           echo "✅ Configuração do Android atualizada"
 
@@ -341,16 +373,6 @@ jobs:
           }
           SIGNING_CONFIG
           echo "✅ Signing configured"
-
-      - name: Sync Capacitor
-        run: |
-          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
-            -H "Content-Type: application/json" \
-            -d '{"build_id": "${{ inputs.build_id || github.event.client_payload.build_id }}", "status": "building", "progress": 60, "message": "Sincronizando Capacitor"}' || true
-          
-          echo "🔄 Syncing Capacitor..."
-          npx cap sync android
-          echo "✅ Capacitor synced"
 
       - name: Notify signing
         run: |
