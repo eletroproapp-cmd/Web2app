@@ -1,0 +1,229 @@
+name: Build Android (Signed for Play Store)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_url:
+        description: 'URL para buscar a configuração do build'
+        required: true
+        type: string
+      build_id:
+        description: 'ID do build para tracking'
+        required: true
+        type: string
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
+
+jobs:
+  validate-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      has_signing_config: ${{ steps.check.outputs.has_config }}
+    steps:
+      - name: Check signing secrets
+        id: check
+        run: |
+          if [ -n "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" ] && \
+             [ -n "${{ secrets.UPLOAD_KEY_ALIAS }}" ] && \
+             [ -n "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}" ] && \
+             [ -n "${{ secrets.UPLOAD_KEY_PASSWORD }}" ]; then
+            echo "has_config=true" >> $GITHUB_OUTPUT
+            echo "✅ Signing secrets configurados"
+          else
+            echo "has_config=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Signing secrets não configurados"
+          fi
+
+  fetch-config:
+    runs-on: ubuntu-latest
+    outputs:
+      app_id: ${{ steps.config.outputs.app_id }}
+      app_name: ${{ steps.config.outputs.app_name }}
+      web_url: ${{ steps.config.outputs.web_url }}
+      icon_url: ${{ steps.config.outputs.icon_url }}
+      webhook_url: ${{ steps.config.outputs.webhook_url }}
+      capacitor_config: ${{ steps.config.outputs.capacitor_config }}
+    steps:
+      - name: Fetch build configuration
+        id: config
+        run: |
+          CONFIG_URL="${{ inputs.config_url }}"
+          BUILD_ID="${{ inputs.build_id }}"
+          echo "📥 Buscando config de: $CONFIG_URL?buildId=$BUILD_ID"
+          RESPONSE=$(curl -s "$CONFIG_URL?buildId=$BUILD_ID")
+          echo "$RESPONSE" | jq .
+          APP_ID=$(echo "$RESPONSE" | jq -r '.config.appId')
+          APP_NAME=$(echo "$RESPONSE" | jq -r '.config.appName')
+          WEB_URL=$(echo "$RESPONSE" | jq -r '.config.webUrl')
+          ICON_URL=$(echo "$RESPONSE" | jq -r '.config.iconUrl // empty')
+          WEBHOOK_URL=$(echo "$RESPONSE" | jq -r '.config.buildMeta.webhookUrl')
+          CAPACITOR_CONFIG=$(echo "$RESPONSE" | jq -c '.files["capacitor.config.json"]')
+          echo "app_id=$APP_ID" >> $GITHUB_OUTPUT
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "web_url=$WEB_URL" >> $GITHUB_OUTPUT
+          echo "icon_url=$ICON_URL" >> $GITHUB_OUTPUT
+          echo "webhook_url=$WEBHOOK_URL" >> $GITHUB_OUTPUT
+          echo "capacitor_config=$CAPACITOR_CONFIG" >> $GITHUB_OUTPUT
+
+  build:
+    needs: [validate-secrets, fetch-config]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Notify build started
+        run: |
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "validating", "progress": 10}' || true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Decode keystore
+        if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
+        run: |
+          echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > upload-key.jks
+
+      - name: Create package.json
+        run: |
+          cat > package.json << 'EOF'
+          {
+            "name": "android-app",
+            "version": "1.0.0",
+            "dependencies": {
+              "@capacitor/android": "^6.0.0",
+              "@capacitor/cli": "^6.0.0",
+              "@capacitor/core": "^6.0.0"
+            }
+          }
+          EOF
+
+      - name: Create Capacitor config
+        run: |
+          echo '${{ needs.fetch-config.outputs.capacitor_config }}' | jq -r '.' > capacitor.config.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Create minimal web build
+        run: |
+          mkdir -p dist
+          cat > dist/index.html << EOF
+          <!DOCTYPE html>
+          <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+          <title>${{ needs.fetch-config.outputs.app_name }}</title>
+          <style>body{margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#0f172a}
+          .loader{width:48px;height:48px;border:4px solid #fff;border-bottom-color:#14b8a6;border-radius:50%;animation:spin 1s linear infinite}
+          @keyframes spin{to{transform:rotate(360deg)}}</style></head>
+          <body><div class="loader"></div><script>window.location.href="${{ needs.fetch-config.outputs.web_url }}";</script></body></html>
+          EOF
+
+      - name: Notify building
+        run: |
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "building", "progress": 40}' || true
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Update Android configuration
+        run: |
+          sed -i "s/applicationId \".*\"/applicationId \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
+          sed -i "s/namespace \".*\"/namespace \"${{ needs.fetch-config.outputs.app_id }}\"/g" android/app/build.gradle
+
+      - name: Configure signing
+        if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
+        run: |
+          cat >> android/app/build.gradle << SIGNING
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("${{ github.workspace }}/upload-key.jks")
+                      storePassword "${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}"
+                      keyAlias "${{ secrets.UPLOAD_KEY_ALIAS }}"
+                      keyPassword "${{ secrets.UPLOAD_KEY_PASSWORD }}"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          SIGNING
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Notify signing
+        run: |
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "signing", "progress": 80}' || true
+
+      - name: Build signed AAB
+        if: ${{ needs.validate-secrets.outputs.has_signing_config == 'true' }}
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew bundleRelease --no-daemon
+
+      - name: Build APK for testing
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Locate outputs
+        id: outputs
+        run: |
+          APK_PATH=$(find android/app/build/outputs -name "*.apk" | head -1)
+          AAB_PATH=$(find android/app/build/outputs -name "*.aab" | head -1 || echo "")
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "aab_path=$AAB_PATH" >> $GITHUB_OUTPUT
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_id }}-apk
+          path: ${{ steps.outputs.outputs.apk_path }}
+          retention-days: 7
+
+      - name: Upload AAB
+        if: ${{ steps.outputs.outputs.aab_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.build_id }}-aab-signed
+          path: ${{ steps.outputs.outputs.aab_path }}
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: rm -f upload-key.jks || true
+
+      - name: Notify complete
+        run: |
+          ARTIFACT_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"build_id\": \"${{ inputs.build_id }}\", \"status\": \"complete\", \"progress\": 100, \"artifact_url\": \"$ARTIFACT_URL\"}"
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          curl -X POST "${{ needs.fetch-config.outputs.webhook_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"build_id": "${{ inputs.build_id }}", "status": "failed", "error_message": "Build falhou"}' || true
